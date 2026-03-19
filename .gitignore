@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+
+# Virtual environment
+venv/
+
+# Generated files
+build/
+dist/
+logs/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# FFmpeg (downloaded binary)
+ffmpeg/
+
+# Models (downloaded at runtime)
+models/*.th
