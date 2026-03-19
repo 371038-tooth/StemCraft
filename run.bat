@@ -256,4 +256,4 @@ goto :eof
 echo.
 echo アプリケーションを終了しました
 echo.
-pause
+exit /b 0
