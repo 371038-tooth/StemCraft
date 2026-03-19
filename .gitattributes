@@ -1,0 +1,8 @@
+* text=auto
+
+# Windowsのバッチファイルは強制的にCRLF（Windows標準の改行）にする
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Linux/Mac用のシェルスクリプトは強制的にLFにする
+*.sh text eol=lf
