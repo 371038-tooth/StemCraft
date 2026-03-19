@@ -1,95 +1,111 @@
 # StemCraft
 
-Windows 向けのボーカル除去ミュージックプレイヤーです。
+曲のボーカル・楽器パートを AI で分離して、ミックスしながら再生できる Windows 向けアプリです。  
+カラオケ音源や各楽器の練習用トラック作成にお使いいただけます。
 
-## 機能
+---
 
-- 音声ファイル読込: MP3、WAV、FLAC、OGG、M4A、MP4
-- AI 音源分離: Demucs による 4 パート / 6 パート分離
-- パート別ミックス: vocals、drums、bass、piano、guitar、other
-- 再生機能: 再生、一時停止、停止、シーク
-- 保存機能: WAV、MP3、FLAC、OGG
+## このアプリでできること
 
-## Windows での使い方
+| 機能 | 内容 |
+|------|------|
+| 音楽ファイルの読み込み | MP3, WAV, FLAC, OGG, M4A, MP4 に対応 |
+| AI による音源分離 | Demucs を使い、ボーカル・ドラム・ベース・ピアノ・ギター・その他に分離 |
+| パート別の音量調整 | 各パート（vocals, drums, bass, piano, guitar, other）を個別にオン/オフ・音量変更 |
+| 再生コントロール | 再生・一時停止・停止・シークバーによる位置移動 |
+| 分離音の書き出し | 分離した音源を WAV, MP3, FLAC, OGG 形式で保存 |
 
-最も簡単な起動方法は [run.bat](run.bat) の実行です。
+---
 
-[run.bat](run.bat) は以下を自動で行います。
+## 起動方法
 
-- Python の有無を確認
-- Python が無ければ同梱インストーラを実行
-- 仮想環境 venv を作成
-- 依存ライブラリをインストール
-- FFmpeg を確認し、必要ならセットアップ
-- Torch / Demucs を確認して不足時にセットアップ
-- アプリを起動
+### 通常起動（推奨）
 
-同梱している Python インストーラ:
+フォルダ内の **`run.bat`** をダブルクリックするだけで起動できます。
 
-- [installers/python-3.11.9-amd64.exe](installers/python-3.11.9-amd64.exe)
+> ⚠️ GitHubのZIPダウンロードで取得した場合、`run.bat` の改行コードがズレてうまく起動しないことがあります。  
+> その場合は **`start_app.bat`** をダブルクリックしてください（改行コードを自動修正してから起動します）。
 
-## PowerShell での起動
+---
 
-PowerShell から起動する場合は [run.ps1](run.ps1) を使えます。
+## 初回起動について（重要）
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\run.ps1
+**初回の起動には 10〜30 分程度かかります。** 以下のセットアップが自動で行われます。
+
+| ステップ | 内容 | 目安時間 |
+|----------|------|----------|
+| Python のインストール | Python 3.11 が入っていない場合は同梱インストーラで自動導入 | 1〜2 分 |
+| 仮想環境（venv）の作成 | アプリ専用の Python 実行環境を `app\venv` に作成 | 1 分 |
+| ライブラリのインストール | PyQt5・librosa・scipy 等の必要パッケージを取得 | 3〜5 分 |
+| FFmpeg のセットアップ | MP3/OGG の読み書きに必要なツールを `app\ffmpeg` に自動ダウンロード | 1〜3 分 |
+| AI モデル（Torch / Demucs）のセットアップ | ボーカル分離 AI のセットアップ（GPU 有: CUDA 版、無: CPU 版） | 5〜15 分 |
+
+2 回目以降はセットアップをスキップし、すぐに起動します。
+
+---
+
+## 必要なディスク容量の目安
+
+初回セットアップ完了後、フォルダ全体で **約 5〜10 GB** を消費します。
+
+| 内容 | 容量目安 |
+|------|----------|
+| Python 3.11 | 約 100 MB |
+| 仮想環境 + ライブラリ | 約 1〜2 GB |
+| AI モデル（Demucs、CUDA 版 Torch） | 約 3〜7 GB |
+| FFmpeg | 約 100 MB |
+
+> C ドライブの空きが **10 GB 以上**あることを確認してからご使用ください。
+
+---
+
+## 注意事項
+
+### インストール途中でウィンドウを閉じてしまった場合
+
+セットアップの途中で誤ってウィンドウを閉じると、仮想環境（`app\venv` フォルダ）が壊れた状態になることがあります。  
+その場合は **`app\venv` フォルダを手動で削除**してから、再度 `run.bat` を実行してください。
+
+```
+削除するフォルダ: (StemCraftのフォルダ)\app\venv
 ```
 
-## 手動セットアップ
+### フォルダの置き場所
 
-Python が既に入っている環境では、手動でも起動できます。
+パス（フォルダの場所）に **日本語が含まれる場合、正常に動作しない**ことがあります。  
+`C:\StemCraft` や `D:\tools\StemCraft` のような **英数字だけのパス**に置くことをお勧めします。
 
-```powershell
-python -m venv venv
-venv\Scripts\activate
-pip install -r requirements.txt
-python main.py
-```
-
-AI 分離を使う場合に Torch 周りで問題が出たら、以下を実行してください。
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\setup_torch_fix.ps1
-```
+---
 
 ## トラブルシューティング
 
-### Python が見つからない場合
+### 起動しない・文字化けしたエラーが出る
 
-- [run.bat](run.bat) は同梱した Python インストーラを自動実行します
-- インストール後も検出されない場合は、いったんウィンドウを閉じて再度 [run.bat](run.bat) を実行してください
+→ `run.bat` の代わりに **`start_app.bat`** を使用してください。
 
-### Torch の初期化に失敗する場合
+### Python が見つからないエラーが出る
 
-- [setup_torch_fix.ps1](setup_torch_fix.ps1) または [setup_torch_fix.bat](setup_torch_fix.bat) を実行してください
-- NVIDIA GPU がある場合は CUDA 版 Torch、無い場合は CPU 版 Torch を導入します
+→ いったんウィンドウを閉じて、再度 `run.bat` を実行してください（インストール直後はパスが反映されていないことがあります）。
 
-### MP3 / OGG 保存が動かない場合
+### AI 音源分離でエラーが出る（Torch 関連）
 
-- FFmpeg が必要です
-- [run.bat](run.bat) は起動時に FFmpeg を確認し、未導入なら [setup_ffmpeg_new.ps1](setup_ffmpeg_new.ps1) を実行します
+→ `setup_torch_fix.bat` をダブルクリックして実行してください。  
+NVIDIA GPU がある場合は CUDA 版、ない場合は CPU 版の Torch が自動でセットアップされます。
 
-## ファイル構成
+### MP3 / OGG の保存が失敗する
 
-```text
-StemCraft/
-├── installers/
-│   └── python-3.11.9-amd64.exe
-├── main.py
-├── run.bat
-├── run.ps1
-├── run.sh
-├── requirements.txt
-├── requirements_extended.txt
-├── setup_ffmpeg_new.ps1
-├── setup_torch_fix.bat
-├── setup_torch_fix.ps1
-├── setup_torch_fix.sh
-└── src/
-```
+→ FFmpeg が必要です。`run.bat` 起動時に自動ダウンロードされますが、失敗している場合は再度 `run.bat` を実行してください。
 
-## 補足
+### AI 分離が遅い
 
-- exe 配布関連のファイルは削除しています
-- Windows では [run.bat](run.bat) を正式な起動手段として想定しています
+→ NVIDIA 製 GPU がある場合は CUDA 版 Torch が使われ大幅に高速化されます。  
+GPU なし（CPU のみ）の場合、1 曲の分離に **数分〜十数分**かかることがあります。
+
+---
+
+## 動作環境
+
+- **OS**: Windows 10 / 11（64ビット）
+- **メモリ**: 8 GB 以上推奨（AI 分離使用時は 16 GB 以上推奨）
+- **GPU**: なくても動作しますが、NVIDIA GPU（CUDA 対応）があると AI 処理が大幅に高速化されます
+- **空きディスク容量**: 10 GB 以上
