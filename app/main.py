@@ -597,6 +597,11 @@ class StemCraftApp(QMainWindow):
         self.ai_4stem_check.setEnabled(self.ai_available)
         self.ai_6stem_check.setEnabled(self.ai_available)
         self.progress_status.setText("✓ 音源分離完了")
+
+        # 分離により音声が初期化されるため、ピッチ・テンポUIをリセットして再検出
+        self._reset_pitch_tempo_ui()
+        self._converted_audio = None
+        self.start_auto_detect()
         
         # 再生中の場合、一旦停止
         was_playing = self.audio_player.is_playing
