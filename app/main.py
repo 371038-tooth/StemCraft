@@ -5,6 +5,7 @@
 
 import sys
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 
 # Torch/Demucsを先に読み込んでDLL依存関係を確定させ、後続のQtロードによるDLL競合を避ける
@@ -166,9 +167,18 @@ class PitchTempoWorker(QThread):
             self.error.emit(f"変換エラー: {str(e)}")
 
     def _apply_to_all(self, func):
-        """stems があれば各ステムに、なければ元音声に func を適用"""
+        """stems があれば各ステムに並列処理、なければ元音声に func を適用"""
         if self.stems:
-            return {name: func(audio) for name, audio in self.stems.items()}
+            results = {}
+            with ThreadPoolExecutor() as executor:
+                futures = {
+                    executor.submit(func, audio): name
+                    for name, audio in self.stems.items()
+                }
+                for future in as_completed(futures):
+                    name = futures[future]
+                    results[name] = future.result()
+            return results
         else:
             return func(self.audio_processor.get_audio_data())
 
@@ -346,9 +356,9 @@ class StemCraftApp(QMainWindow):
 
         # テンポ行
         tempo_row = QHBoxLayout()
-        tempo_row.addWidget(QLabel("テンポ:"))
-        self.tempo_detected_label = QLabel("BPM —")
-        self.tempo_detected_label.setFixedWidth(80)
+        tempo_row.addWidget(QLabel("BPM:"))
+        self.tempo_detected_label = QLabel("—")
+        self.tempo_detected_label.setFixedWidth(45)
         tempo_row.addWidget(self.tempo_detected_label)
         tempo_row.addWidget(QLabel("⇒"))
         self.tempo_spinbox = QSpinBox()
@@ -357,7 +367,7 @@ class StemCraftApp(QMainWindow):
         self.tempo_spinbox.setFixedWidth(70)
         tempo_row.addWidget(self.tempo_spinbox)
         tempo_row.addWidget(QLabel("BPM"))
-        self.apply_tempo_btn = QPushButton("テンポ適用")
+        self.apply_tempo_btn = QPushButton("BPM適用")
         self.apply_tempo_btn.clicked.connect(self.apply_tempo)
         tempo_row.addWidget(self.apply_tempo_btn)
         tempo_row.addStretch()
@@ -897,7 +907,7 @@ class StemCraftApp(QMainWindow):
     def _reset_pitch_tempo_ui(self):
         """ピッチ・テンポ UI をリセットして無効化する"""
         self.pitch_tempo_group.setEnabled(False)
-        self.tempo_detected_label.setText("BPM —")
+        self.tempo_detected_label.setText("—")
         self.tempo_spinbox.setValue(120)
         self.key_detected_label.setText("—")
         self.key_transposed_label.setText("—")
@@ -920,7 +930,7 @@ class StemCraftApp(QMainWindow):
 
     def on_auto_detect_finished(self, bpm: int, key: str):
         """自動検出完了 → UI 更新"""
-        self.tempo_detected_label.setText(f"BPM {bpm}")
+        self.tempo_detected_label.setText(f"{bpm}")
         self.tempo_spinbox.setValue(bpm)
         self.key_detected_label.setText(key)
         self.key_transposed_label.setText(key)
