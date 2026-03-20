@@ -118,19 +118,19 @@ class PitchTempoWorker(QThread):
     error = pyqtSignal(str)
     progress = pyqtSignal(str)
 
-    def __init__(self, audio_processor, mode, stems=None, **kwargs):
+    def __init__(self, audio_processor, stems=None, n_steps=0, rate=1.0):
         """
         Args:
             audio_processor: AudioProcessor インスタンス
-            mode: 'pitch' または 'tempo'
             stems: dict | None  ステム分離済み音声
-            kwargs: mode='pitch' → n_steps=int, mode='tempo' → original_bpm=int, target_bpm=int
+            n_steps: ピッチシフト量（半音単位、0 で変換なし）
+            rate: タイムストレッチ倍率（1.0 で変換なし）
         """
         super().__init__()
         self.audio_processor = audio_processor
-        self.mode = mode
         self.stems = stems
-        self.kwargs = kwargs
+        self.n_steps = n_steps
+        self.rate = rate
 
     def run(self):
         try:
@@ -139,30 +139,22 @@ class PitchTempoWorker(QThread):
                 self.error.emit("音声データがありません")
                 return
 
-            if self.mode == 'pitch':
-                n_steps = self.kwargs.get('n_steps', 0)
-                self.progress.emit(f"🎵 ピッチ変換中 ({n_steps:+d} 半音)...")
-                result = self._apply_to_all(
-                    lambda audio: self.audio_processor.apply_pitch_shift(audio, n_steps, sr)
-                )
+            msg_parts = []
+            if self.n_steps != 0:
+                msg_parts.append(f"ピッチ {self.n_steps:+d} 半音")
+            if abs(self.rate - 1.0) > 0.001:
+                msg_parts.append(f"テンポ ×{self.rate:.3f}")
+            self.progress.emit(f"🎵 変換中 ({', '.join(msg_parts) or '変更なし'})...")
 
-            elif self.mode == 'tempo':
-                original_bpm = self.kwargs.get('original_bpm', 120)
-                target_bpm = self.kwargs.get('target_bpm', 120)
-                if target_bpm <= 0:
-                    self.error.emit("無効なBPM値です")
-                    return
-                rate = target_bpm / original_bpm
-                self.progress.emit(f"⏱ テンポ変換中 ({original_bpm} → {target_bpm} BPM)...")
-                result = self._apply_to_all(
-                    lambda audio: self.audio_processor.apply_time_stretch(audio, rate, sr)
-                )
+            def transform(audio):
+                result = audio
+                if self.n_steps != 0:
+                    result = self.audio_processor.apply_pitch_shift(result, self.n_steps, sr)
+                if abs(self.rate - 1.0) > 0.001:
+                    result = self.audio_processor.apply_time_stretch(result, self.rate, sr)
+                return result
 
-            else:
-                self.error.emit(f"不明なモード: {self.mode}")
-                return
-
-            self.finished.emit(result)
+            self.finished.emit(self._apply_to_all(transform))
         except Exception as e:
             self.error.emit(f"変換エラー: {str(e)}")
 
@@ -201,7 +193,8 @@ class StemCraftApp(QMainWindow):
         self.stems = {}
         self.stem_sliders = {}
         self._converted_audio = None  # 変換済み音声データ（ピッチ/テンポ変換後）
-        
+        self._current_pitch_steps: int = 0  # 現在適用中のピッチシフト量
+
         # ピッチ・テンポ変換ワーカー
         self.auto_detect_worker = None
         self.pitch_tempo_worker = None
@@ -912,6 +905,7 @@ class StemCraftApp(QMainWindow):
         self.key_detected_label.setText("—")
         self.key_transposed_label.setText("—")
         self.pitch_spinbox.setValue(0)
+        self._current_pitch_steps = 0
 
     def start_auto_detect(self):
         """BPM・キーの自動検出を開始する（バックグラウンド）"""
@@ -961,29 +955,34 @@ class StemCraftApp(QMainWindow):
     # ──────────────────────────────────────────────────────────────────────────
 
     def apply_pitch(self):
-        """ピッチ変換を開始"""
+        """ピッチ変換を開始（現在のBPM設定も同時に適用）"""
         if self.pitch_tempo_worker is not None and self.pitch_tempo_worker.isRunning():
             self.progress_status.setText("⏳ 変換処理中です。完了をお待ちください")
             return
 
         n_steps = self.pitch_spinbox.value()
-        self._start_pitch_tempo_worker(mode='pitch', n_steps=n_steps)
+        self._current_pitch_steps = n_steps
+        rate = self._current_tempo_rate()
+        self._start_pitch_tempo_worker(n_steps=n_steps, rate=rate)
 
     def apply_tempo(self):
-        """テンポ変換を開始"""
+        """テンポ変換を開始（現在のピッチ設定も同時に適用）"""
         if self.pitch_tempo_worker is not None and self.pitch_tempo_worker.isRunning():
             self.progress_status.setText("⏳ 変換処理中です。完了をお待ちください")
             return
 
+        rate = self._current_tempo_rate()
+        self._start_pitch_tempo_worker(n_steps=self._current_pitch_steps, rate=rate)
+
+    def _current_tempo_rate(self) -> float:
+        """現在のテンポスピンボックスから変換レートを算出する"""
         original_bpm = self.audio_processor.detected_bpm or self.tempo_spinbox.value()
         target_bpm = self.tempo_spinbox.value()
-        self._start_pitch_tempo_worker(
-            mode='tempo',
-            original_bpm=original_bpm,
-            target_bpm=target_bpm,
-        )
+        if original_bpm <= 0:
+            return 1.0
+        return target_bpm / original_bpm
 
-    def _start_pitch_tempo_worker(self, mode: str, **kwargs):
+    def _start_pitch_tempo_worker(self, n_steps: int = 0, rate: float = 1.0):
         """PitchTempoWorker を起動する共通処理"""
         if self.audio_processor.get_audio_data() is None:
             self.progress_status.setText("❌ 先にファイルを開いてください")
@@ -995,7 +994,7 @@ class StemCraftApp(QMainWindow):
         self.pitch_tempo_group.setEnabled(False)
         stems = dict(self._original_stems) if self._original_stems else None
         self.pitch_tempo_worker = PitchTempoWorker(
-            self.audio_processor, mode=mode, stems=stems, **kwargs
+            self.audio_processor, stems=stems, n_steps=n_steps, rate=rate
         )
         self.pitch_tempo_worker.finished.connect(self.on_pitch_tempo_finished)
         self.pitch_tempo_worker.error.connect(self.on_pitch_tempo_error)
