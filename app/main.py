@@ -151,7 +151,7 @@ class PitchTempoWorker(QThread):
                 if target_bpm <= 0:
                     self.error.emit("無効なBPM値です")
                     return
-                rate = original_bpm / target_bpm
+                rate = target_bpm / original_bpm
                 self.progress.emit(f"⏱ テンポ変換中 ({original_bpm} → {target_bpm} BPM)...")
                 result = self._apply_to_all(
                     lambda audio: self.audio_processor.apply_time_stretch(audio, rate, sr)
@@ -190,6 +190,7 @@ class StemCraftApp(QMainWindow):
         # AI分離データの管理
         self.stems = {}
         self.stem_sliders = {}
+        self._converted_audio = None  # 変換済み音声データ（ピッチ/テンポ変換後）
         
         # ピッチ・テンポ変換ワーカー
         self.auto_detect_worker = None
@@ -429,6 +430,7 @@ class StemCraftApp(QMainWindow):
                     self.stop_audio()
                 self.stems = {}
                 self._original_stems = {}
+                self._converted_audio = None
                 self.stems_widget.setVisible(False)
                 self.is_vocal_removed = False
                 self.use_ai_removal = False
@@ -463,8 +465,9 @@ class StemCraftApp(QMainWindow):
                 self.audio_player.set_multi_track_audio(self.stems, self.audio_processor.sr_loaded)
                 self.apply_stem_mix_settings()
             else:
+                audio_data = self._converted_audio if self._converted_audio is not None else self.audio_processor.get_audio_data()
                 self.audio_player.set_audio(
-                    self.audio_processor.get_audio_data(),
+                    audio_data,
                     self.audio_processor.sr_loaded
                 )
             
@@ -1000,10 +1003,12 @@ class StemCraftApp(QMainWindow):
         if isinstance(result, dict):
             # ステムごとの変換結果
             self.stems = result
+            self._converted_audio = None
             self.audio_player.set_multi_track_audio(self.stems, sr)
             self.apply_stem_mix_settings()
         else:
             # 単一トラックの変換結果
+            self._converted_audio = result
             self.audio_player.set_audio(result, sr)
 
         self.progress_status.setText("✓ 変換完了")
