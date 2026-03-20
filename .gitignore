@@ -15,6 +15,7 @@ logs/
 # IDE
 .vscode/
 .idea/
+.github/
 
 # OS
 Thumbs.db
