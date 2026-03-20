@@ -194,6 +194,7 @@ class StemCraftApp(QMainWindow):
         # ピッチ・テンポ変換ワーカー
         self.auto_detect_worker = None
         self.pitch_tempo_worker = None
+        self._original_stems: dict = {}  # 音源分離直後の元ステムを保持
 
         # AI除去の初期化状態
         self.advanced_remover = get_advanced_remover()
@@ -427,6 +428,7 @@ class StemCraftApp(QMainWindow):
                 if self.audio_player.is_playing:
                     self.stop_audio()
                 self.stems = {}
+                self._original_stems = {}
                 self.stems_widget.setVisible(False)
                 self.is_vocal_removed = False
                 self.use_ai_removal = False
@@ -553,6 +555,7 @@ class StemCraftApp(QMainWindow):
 
         self.is_vocal_removed = False
         self.stems = {}  # ステムをリセット
+        self._original_stems = {}
         self.stems_widget.setVisible(False)
         
         if clear_status:
@@ -583,6 +586,7 @@ class StemCraftApp(QMainWindow):
             return
 
         self.stems = self.vocal_removal_worker.result
+        self._original_stems = dict(self.stems)  # 元ステムを保存
         self.ai_4stem_check.setEnabled(self.ai_available)
         self.ai_6stem_check.setEnabled(self.ai_available)
         self.progress_status.setText("✓ 音源分離完了")
@@ -975,7 +979,7 @@ class StemCraftApp(QMainWindow):
             self.pitch_tempo_worker.deleteLater()
 
         self.pitch_tempo_group.setEnabled(False)
-        stems = dict(self.stems) if self.stems else None
+        stems = dict(self._original_stems) if self._original_stems else None
         self.pitch_tempo_worker = PitchTempoWorker(
             self.audio_processor, mode=mode, stems=stems, **kwargs
         )
