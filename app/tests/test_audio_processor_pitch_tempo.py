@@ -11,6 +11,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from src.audio_processor import AudioProcessor
+import src.audio_processor as audio_processor_module
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -156,6 +157,64 @@ class TestApplyTimeStretch:
         audio, sr = _make_sine(channels=2, duration=2.0)
         out = processor.apply_time_stretch(audio, rate=1.0, sr=sr)
         assert abs(len(out) - len(audio)) <= 512
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# apply_pitch_and_tempo
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestApplyPitchAndTempo:
+    def test_noop_keeps_shape_and_dtype(self, processor):
+        audio, sr = _make_sine(channels=2, duration=2.0)
+        out = processor.apply_pitch_and_tempo(audio, n_steps=0, rate=1.0, sr=sr)
+        assert out.shape == audio.shape
+        assert out.dtype == np.float32
+
+    def test_pitch_only_keeps_shape(self, processor):
+        audio, sr = _make_sine(channels=2, duration=2.0)
+        out = processor.apply_pitch_and_tempo(audio, n_steps=2, rate=1.0, sr=sr)
+        assert out.shape == audio.shape
+
+    def test_tempo_only_changes_length(self, processor):
+        audio, sr = _make_sine(channels=2, duration=2.0)
+        rate = 1.25
+        out = processor.apply_pitch_and_tempo(audio, n_steps=0, rate=rate, sr=sr)
+        expected_len = int(len(audio) / rate)
+        assert abs(len(out) - expected_len) <= 1024
+
+    def test_progress_callback_called(self, processor):
+        audio, sr = _make_sine(channels=2, duration=1.0)
+        progress_values = []
+
+        out = processor.apply_pitch_and_tempo(
+            audio,
+            n_steps=1,
+            rate=1.0,
+            sr=sr,
+            progress_callback=lambda p: progress_values.append(int(p)),
+        )
+
+        assert out.shape[1] == audio.shape[1]
+        assert len(progress_values) >= 1
+        assert progress_values[-1] == 100
+
+    def test_fallback_to_librosa_when_pedalboard_fails(self, processor, monkeypatch):
+        audio, sr = _make_sine(channels=2, duration=2.0)
+
+        monkeypatch.setattr(audio_processor_module, "_PEDALBOARD_AVAILABLE", True)
+        monkeypatch.setattr(audio_processor_module, "_PEDALBOARD_HAS_TIMESTRETCH", True)
+
+        def broken_time_stretch(*args, **kwargs):
+            raise RuntimeError("simulated pedalboard failure")
+
+        class _DummyPedalboardModule:
+            time_stretch = staticmethod(broken_time_stretch)
+
+        monkeypatch.setattr(audio_processor_module, "_pedalboard", _DummyPedalboardModule, raising=False)
+
+        out = processor.apply_pitch_and_tempo(audio, n_steps=0, rate=1.2, sr=sr)
+        assert out.ndim == 2
+        assert out.shape[1] == audio.shape[1]
 
 
 # ──────────────────────────────────────────────────────────────────────────────

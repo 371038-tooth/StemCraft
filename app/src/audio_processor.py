@@ -14,8 +14,12 @@ from pydub import AudioSegment
 try:
     import pedalboard as _pedalboard
     _PEDALBOARD_AVAILABLE = True
+    _PEDALBOARD_HAS_PITCHSHIFT = hasattr(_pedalboard, 'PitchShift')
+    _PEDALBOARD_HAS_TIMESTRETCH = hasattr(_pedalboard, 'time_stretch')
 except ImportError:
     _PEDALBOARD_AVAILABLE = False
+    _PEDALBOARD_HAS_PITCHSHIFT = False
+    _PEDALBOARD_HAS_TIMESTRETCH = False
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -283,7 +287,14 @@ class AudioProcessor:
         """内部ユーティリティ: (channels, samples) -> (samples, channels)"""
         return result.T if original_ndim == 2 else result[0].reshape(-1, 1)
 
-    def apply_pitch_and_tempo(self, audio: np.ndarray, n_steps: int, rate: float, sr: int) -> np.ndarray:
+    def apply_pitch_and_tempo(
+        self,
+        audio: np.ndarray,
+        n_steps: int,
+        rate: float,
+        sr: int,
+        progress_callback=None,
+    ) -> np.ndarray:
         """ピッチとテンポを一括適用（pedalboard を優先使用）
 
         Args:
@@ -291,22 +302,44 @@ class AudioProcessor:
             n_steps: 半音単位のピッチシフト量（0 で変換なし）
             rate: タイムストレッチ倍率（1.0 で変換なし、>1 で高速）
             sr: サンプリングレート
+            progress_callback: オプション。int(0-100) を受け取る進捗コールバック
 
         Returns:
             ndarray: (samples_out, channels) 形式の変換済み音声
         """
         if n_steps == 0 and abs(rate - 1.0) <= 0.001:
+            if progress_callback:
+                progress_callback(100)
             return np.asarray(audio, dtype=np.float32)
 
         if _PEDALBOARD_AVAILABLE:
-            ch_first = self._to_ch_first(audio)
-            result = _pedalboard.time_stretch(
-                ch_first,
-                float(sr),
-                stretch_factor=float(rate),
-                pitch_shift_in_semitones=float(n_steps),
-            )
-            return self._from_ch_first(result, audio.ndim)
+            try:
+                ch_first = self._to_ch_first(audio)
+                # ピッチのみの場合: チャンク処理で進捗を報告しながら PitchShift を適用
+                if n_steps != 0 and abs(rate - 1.0) <= 0.001 and _PEDALBOARD_HAS_PITCHSHIFT:
+                    result = self._pitch_shift_chunked(ch_first, n_steps, sr, progress_callback)
+                    return self._from_ch_first(result, audio.ndim)
+                # テンポ変更 or テンポ+ピッチ同時変換: time_stretch (RubberBand)
+                # チャンネル毎に処理して進捗を報告
+                if _PEDALBOARD_HAS_TIMESTRETCH:
+                    n_ch = ch_first.shape[0]
+                    ch_results = []
+                    for c in range(n_ch):
+                        ch_data = ch_first[c:c+1, :]  # (1, samples)
+                        ch_out = _pedalboard.time_stretch(
+                            ch_data,
+                            float(sr),
+                            stretch_factor=float(rate),
+                            pitch_shift_in_semitones=float(n_steps),
+                        )
+                        ch_results.append(ch_out)
+                        if progress_callback:
+                            progress_callback(int((c + 1) / n_ch * 100))
+                    result = np.concatenate(ch_results, axis=0)
+                    return self._from_ch_first(result, audio.ndim)
+            except Exception:
+                # pedalboard が利用可能でも実行時エラーはあり得るため librosa に退避
+                pass
 
         # pedalboard なしのフォールバック: librosa で順次適用
         result = np.asarray(audio, dtype=np.float32)
@@ -314,7 +347,72 @@ class AudioProcessor:
             result = self.apply_pitch_shift(result, n_steps, sr)
         if abs(rate - 1.0) > 0.001:
             result = self.apply_time_stretch(result, rate, sr)
+        if progress_callback:
+            progress_callback(100)
         return result
+
+    def _pitch_shift_chunked(
+        self,
+        ch_first: np.ndarray,
+        n_steps: int,
+        sr: int,
+        progress_callback=None,
+    ) -> np.ndarray:
+        """Pedalboard.PitchShift をチャンク単位で実行して進捗を報告する。
+
+        Args:
+            ch_first: (channels, samples) 形式
+            n_steps: 半音単位のシフト量
+            sr: サンプリングレート
+            progress_callback: int(0-100) を受け取るコールバック
+
+        Returns:
+            (channels, samples) 形式の変換済み音声
+        """
+        n_channels, n_samples = ch_first.shape
+        # 4秒チャンク + 前後50msのオーバーラップでクロスフェード結合
+        chunk_size = sr * 4
+        overlap = min(int(sr * 0.05), chunk_size // 4)  # 50ms
+        n_chunks = max(1, (n_samples + chunk_size - 1) // chunk_size)
+
+        board = _pedalboard.Pedalboard([_pedalboard.PitchShift(semitones=float(n_steps))])
+
+        # 初回チャンク
+        first_end = min(chunk_size + overlap, n_samples)
+        out = board(ch_first[:, :first_end].copy(), float(sr), reset=True)
+        result = out[:, :min(chunk_size, out.shape[1])]
+        if progress_callback:
+            progress_callback(int(1 / n_chunks * 100))
+
+        for i in range(1, n_chunks):
+            # overlap 分だけ手前から読む
+            raw_start = i * chunk_size - overlap
+            raw_end = min((i + 1) * chunk_size + overlap, n_samples)
+            chunk = ch_first[:, raw_start:raw_end].copy()
+            out = board(chunk, float(sr), reset=True)
+
+            # overlap 区間をリニアクロスフェード
+            fade_len = min(overlap, result.shape[1], out.shape[1])
+            if fade_len > 0:
+                fade_in = np.linspace(0.0, 1.0, fade_len, dtype=np.float32)
+                fade_out = 1.0 - fade_in
+                result[:, -fade_len:] = (
+                    result[:, -fade_len:] * fade_out + out[:, :fade_len] * fade_in
+                )
+                body = out[:, fade_len:]
+            else:
+                body = out
+
+            # 末尾の overlap を次回クロスフェード用に残す
+            keep_end = min(chunk_size, body.shape[1])
+            result = np.concatenate([result, body[:, :keep_end]], axis=1)
+
+            if progress_callback:
+                progress_callback(int((i + 1) / n_chunks * 100))
+
+        # 元サンプル数に揃える
+        return result[:, :n_samples]
+
     def apply_pitch_shift(self, audio: np.ndarray, n_steps: int, sr: int) -> np.ndarray:
         """
         ピッチシフトを適用する。ステレオ入力にも対応。
