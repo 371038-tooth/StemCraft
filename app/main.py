@@ -13,6 +13,7 @@ from src.advanced_vocal_remover import get_advanced_remover
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QSlider, QLabel, QCheckBox, QFileDialog, QProgressBar,
+    QGroupBox, QSpinBox,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QFont
@@ -79,6 +80,99 @@ class VocalRemovalWorker(QThread):
             self.error.emit(f"音源分離エラー: {str(e)}")
 
 
+class AutoDetectWorker(QThread):
+    """BPM・キー自動検出ワーカー"""
+    finished = pyqtSignal(int, str)
+    error = pyqtSignal(str)
+
+    def __init__(self, audio_processor):
+        super().__init__()
+        self.audio_processor = audio_processor
+
+    def run(self):
+        try:
+            y = self.audio_processor.get_audio_data()
+            sr = self.audio_processor.sr_loaded
+            if y is None or sr is None:
+                self.error.emit("音声データがありません")
+                return
+
+            # モノラルに変換して検出
+            mono = y[:, 0] if y.ndim == 2 else y
+
+            bpm = self.audio_processor.detect_tempo(mono, sr)
+            key = self.audio_processor.detect_key(mono, sr)
+
+            self.audio_processor.detected_bpm = bpm
+            self.audio_processor.detected_key = key
+
+            self.finished.emit(bpm, key)
+        except Exception as e:
+            self.error.emit(f"自動検出エラー: {str(e)}")
+
+
+class PitchTempoWorker(QThread):
+    """ピッチ・テンポ変換ワーカー"""
+    finished = pyqtSignal(object)
+    error = pyqtSignal(str)
+    progress = pyqtSignal(str)
+
+    def __init__(self, audio_processor, mode, stems=None, **kwargs):
+        """
+        Args:
+            audio_processor: AudioProcessor インスタンス
+            mode: 'pitch' または 'tempo'
+            stems: dict | None  ステム分離済み音声
+            kwargs: mode='pitch' → n_steps=int, mode='tempo' → original_bpm=int, target_bpm=int
+        """
+        super().__init__()
+        self.audio_processor = audio_processor
+        self.mode = mode
+        self.stems = stems
+        self.kwargs = kwargs
+
+    def run(self):
+        try:
+            sr = self.audio_processor.sr_loaded
+            if sr is None:
+                self.error.emit("音声データがありません")
+                return
+
+            if self.mode == 'pitch':
+                n_steps = self.kwargs.get('n_steps', 0)
+                self.progress.emit(f"🎵 ピッチ変換中 ({n_steps:+d} 半音)...")
+                result = self._apply_to_all(
+                    lambda audio: self.audio_processor.apply_pitch_shift(audio, n_steps, sr)
+                )
+
+            elif self.mode == 'tempo':
+                original_bpm = self.kwargs.get('original_bpm', 120)
+                target_bpm = self.kwargs.get('target_bpm', 120)
+                if target_bpm <= 0:
+                    self.error.emit("無効なBPM値です")
+                    return
+                rate = original_bpm / target_bpm
+                self.progress.emit(f"⏱ テンポ変換中 ({original_bpm} → {target_bpm} BPM)...")
+                result = self._apply_to_all(
+                    lambda audio: self.audio_processor.apply_time_stretch(audio, rate, sr)
+                )
+
+            else:
+                self.error.emit(f"不明なモード: {self.mode}")
+                return
+
+            self.finished.emit(result)
+        except Exception as e:
+            self.error.emit(f"変換エラー: {str(e)}")
+
+    def _apply_to_all(self, func):
+        """stems があれば各ステムに、なければ元音声に func を適用"""
+        if self.stems:
+            return {name: func(audio) for name, audio in self.stems.items()}
+        else:
+            return func(self.audio_processor.get_audio_data())
+
+
 class StemCraftApp(QMainWindow):
     """メインアプリケーションウィンドウ"""
     
@@ -97,6 +191,10 @@ class StemCraftApp(QMainWindow):
         self.stems = {}
         self.stem_sliders = {}
         
+        # ピッチ・テンポ変換ワーカー
+        self.auto_detect_worker = None
+        self.pitch_tempo_worker = None
+
         # AI除去の初期化状態
         self.advanced_remover = get_advanced_remover()
         self.ai_available = False
@@ -238,6 +336,60 @@ class StemCraftApp(QMainWindow):
         self.progress_status.setFont(QFont("Arial", 9))
         main_layout.addWidget(self.progress_status)
         
+        # ─── テンポ・ピッチセクション ────────────────────────────────────────
+        self.pitch_tempo_group = QGroupBox("テンポ・ピッチ")
+        self.pitch_tempo_group.setFont(QFont("Arial", 10, QFont.Bold))
+        self.pitch_tempo_group.setEnabled(False)
+        pt_layout = QVBoxLayout()
+
+        # テンポ行
+        tempo_row = QHBoxLayout()
+        tempo_row.addWidget(QLabel("テンポ:"))
+        self.tempo_detected_label = QLabel("BPM —")
+        self.tempo_detected_label.setFixedWidth(80)
+        tempo_row.addWidget(self.tempo_detected_label)
+        tempo_row.addWidget(QLabel("⇒"))
+        self.tempo_spinbox = QSpinBox()
+        self.tempo_spinbox.setRange(20, 300)
+        self.tempo_spinbox.setValue(120)
+        self.tempo_spinbox.setFixedWidth(70)
+        tempo_row.addWidget(self.tempo_spinbox)
+        tempo_row.addWidget(QLabel("BPM"))
+        self.apply_tempo_btn = QPushButton("テンポ適用")
+        self.apply_tempo_btn.clicked.connect(self.apply_tempo)
+        tempo_row.addWidget(self.apply_tempo_btn)
+        tempo_row.addStretch()
+        pt_layout.addLayout(tempo_row)
+
+        # ピッチ行
+        pitch_row = QHBoxLayout()
+        pitch_row.addWidget(QLabel("ピッチ:"))
+        self.pitch_spinbox = QSpinBox()
+        self.pitch_spinbox.setRange(-12, 12)
+        self.pitch_spinbox.setValue(0)
+        self.pitch_spinbox.setFixedWidth(60)
+        self.pitch_spinbox.valueChanged.connect(self.on_pitch_value_changed)
+        pitch_row.addWidget(self.pitch_spinbox)
+        pitch_row.addWidget(QLabel("半音"))
+        pitch_row.addSpacing(12)
+        pitch_row.addWidget(QLabel("キー:"))
+        self.key_detected_label = QLabel("—")
+        self.key_detected_label.setFixedWidth(100)
+        pitch_row.addWidget(self.key_detected_label)
+        pitch_row.addWidget(QLabel("⇒"))
+        self.key_transposed_label = QLabel("—")
+        self.key_transposed_label.setFixedWidth(100)
+        pitch_row.addWidget(self.key_transposed_label)
+        self.apply_pitch_btn = QPushButton("ピッチ適用")
+        self.apply_pitch_btn.clicked.connect(self.apply_pitch)
+        pitch_row.addWidget(self.apply_pitch_btn)
+        pitch_row.addStretch()
+        pt_layout.addLayout(pitch_row)
+
+        self.pitch_tempo_group.setLayout(pt_layout)
+        main_layout.addWidget(self.pitch_tempo_group)
+        # ─────────────────────────────────────────────────────────────────────
+
         # 保存ボタン
         save_layout = QHBoxLayout()
         self.save_btn = QPushButton("💾 オフボーカル保存")
@@ -286,6 +438,10 @@ class StemCraftApp(QMainWindow):
                 self.pause_btn.setEnabled(True)
                 self.stop_btn.setEnabled(True)
                 self.save_btn.setEnabled(True)
+
+                # ピッチ・テンポウィジェットをリセットして自動検出を開始
+                self._reset_pitch_tempo_ui()
+                self.start_auto_detect()
             else:
                 self.file_label.setText("ファイル: 読込失敗")
     
@@ -726,6 +882,136 @@ class StemCraftApp(QMainWindow):
         self.ai_status_label.setText(f"❌ {error_message}")
         self.progress_status.setText(f"❌ {error_message}")
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # ピッチ・テンポ 自動検出
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _reset_pitch_tempo_ui(self):
+        """ピッチ・テンポ UI をリセットして無効化する"""
+        self.pitch_tempo_group.setEnabled(False)
+        self.tempo_detected_label.setText("BPM —")
+        self.tempo_spinbox.setValue(120)
+        self.key_detected_label.setText("—")
+        self.key_transposed_label.setText("—")
+        self.pitch_spinbox.setValue(0)
+
+    def start_auto_detect(self):
+        """BPM・キーの自動検出を開始する（バックグラウンド）"""
+        if self.auto_detect_worker is not None and self.auto_detect_worker.isRunning():
+            return
+
+        self.progress_status.setText("🔍 BPM・キーを自動検出中...")
+
+        if self.auto_detect_worker is not None:
+            self.auto_detect_worker.deleteLater()
+
+        self.auto_detect_worker = AutoDetectWorker(self.audio_processor)
+        self.auto_detect_worker.finished.connect(self.on_auto_detect_finished)
+        self.auto_detect_worker.error.connect(self.on_auto_detect_error)
+        self.auto_detect_worker.start()
+
+    def on_auto_detect_finished(self, bpm: int, key: str):
+        """自動検出完了 → UI 更新"""
+        self.tempo_detected_label.setText(f"BPM {bpm}")
+        self.tempo_spinbox.setValue(bpm)
+        self.key_detected_label.setText(key)
+        self.key_transposed_label.setText(key)
+        self.pitch_tempo_group.setEnabled(True)
+        self.progress_status.setText(f"✓ 検出完了: {bpm} BPM / キー {key}")
+
+    def on_auto_detect_error(self, msg: str):
+        """自動検出エラー"""
+        self.progress_status.setText(f"⚠ 自動検出エラー: {msg}")
+        # エラーでもウィジェット自体は有効化して手動入力できるようにする
+        self.pitch_tempo_group.setEnabled(True)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # ピッチ QSpinBox リアルタイム更新
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def on_pitch_value_changed(self, value: int):
+        """ピッチ値変更時にキー表示をリアルタイム更新（変換処理は行わない）"""
+        base_key = self.audio_processor.detected_key
+        if base_key:
+            transposed = self.audio_processor.transpose_key(base_key, value)
+            self.key_transposed_label.setText(transposed)
+        else:
+            self.key_transposed_label.setText("—")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # ピッチ・テンポ適用
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def apply_pitch(self):
+        """ピッチ変換を開始"""
+        if self.pitch_tempo_worker is not None and self.pitch_tempo_worker.isRunning():
+            self.progress_status.setText("⏳ 変換処理中です。完了をお待ちください")
+            return
+
+        n_steps = self.pitch_spinbox.value()
+        self._start_pitch_tempo_worker(mode='pitch', n_steps=n_steps)
+
+    def apply_tempo(self):
+        """テンポ変換を開始"""
+        if self.pitch_tempo_worker is not None and self.pitch_tempo_worker.isRunning():
+            self.progress_status.setText("⏳ 変換処理中です。完了をお待ちください")
+            return
+
+        original_bpm = self.audio_processor.detected_bpm or self.tempo_spinbox.value()
+        target_bpm = self.tempo_spinbox.value()
+        self._start_pitch_tempo_worker(
+            mode='tempo',
+            original_bpm=original_bpm,
+            target_bpm=target_bpm,
+        )
+
+    def _start_pitch_tempo_worker(self, mode: str, **kwargs):
+        """PitchTempoWorker を起動する共通処理"""
+        if self.audio_processor.get_audio_data() is None:
+            self.progress_status.setText("❌ 先にファイルを開いてください")
+            return
+
+        if self.pitch_tempo_worker is not None:
+            self.pitch_tempo_worker.deleteLater()
+
+        self.pitch_tempo_group.setEnabled(False)
+        stems = dict(self.stems) if self.stems else None
+        self.pitch_tempo_worker = PitchTempoWorker(
+            self.audio_processor, mode=mode, stems=stems, **kwargs
+        )
+        self.pitch_tempo_worker.finished.connect(self.on_pitch_tempo_finished)
+        self.pitch_tempo_worker.error.connect(self.on_pitch_tempo_error)
+        self.pitch_tempo_worker.progress.connect(lambda msg: self.progress_status.setText(msg))
+        self.pitch_tempo_worker.start()
+
+    def on_pitch_tempo_finished(self, result):
+        """変換完了 → プレイヤーに反映"""
+        self.pitch_tempo_group.setEnabled(True)
+        sr = self.audio_processor.sr_loaded
+
+        was_playing = self.audio_player.is_playing
+        if was_playing:
+            self.stop_audio()
+
+        if isinstance(result, dict):
+            # ステムごとの変換結果
+            self.stems = result
+            self.audio_player.set_multi_track_audio(self.stems, sr)
+            self.apply_stem_mix_settings()
+        else:
+            # 単一トラックの変換結果
+            self.audio_player.set_audio(result, sr)
+
+        self.progress_status.setText("✓ 変換完了")
+
+        if was_playing:
+            self.play_audio()
+
+    def on_pitch_tempo_error(self, msg: str):
+        """変換エラー"""
+        self.pitch_tempo_group.setEnabled(True)
+        self.progress_status.setText(f"❌ {msg}")
+
     def closeEvent(self, event):
         """終了時に再生とワーカースレッドを停止"""
         self.update_timer.stop()
@@ -740,6 +1026,16 @@ class StemCraftApp(QMainWindow):
             self.model_init_worker.requestInterruption()
             self.model_init_worker.quit()
             self.model_init_worker.wait(5000)
+
+        if self.auto_detect_worker is not None and self.auto_detect_worker.isRunning():
+            self.auto_detect_worker.requestInterruption()
+            self.auto_detect_worker.quit()
+            self.auto_detect_worker.wait(5000)
+
+        if self.pitch_tempo_worker is not None and self.pitch_tempo_worker.isRunning():
+            self.pitch_tempo_worker.requestInterruption()
+            self.pitch_tempo_worker.quit()
+            self.pitch_tempo_worker.wait(5000)
 
         super().closeEvent(event)
 

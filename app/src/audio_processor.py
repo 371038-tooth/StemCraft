@@ -5,10 +5,45 @@
 
 import numpy as np
 import librosa
+import librosa.feature.rhythm
 import soundfile as sf
 from pathlib import Path
 import tempfile
 from pydub import AudioSegment
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Krumhansl-Schmuckler 調性プロファイル（モジュール定数）
+# ──────────────────────────────────────────────────────────────────────────────
+_KS_MAJOR = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
+_KS_MINOR = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
+
+# 半音インデックス → 正準音名（♯/♭混在の慣例的表記）
+_NOTE_NAMES = ["C", "C#", "D", "E♭", "E", "F", "F#", "G", "A♭", "A", "B♭", "B"]
+
+# 音名文字列 → 半音インデックス（異名同音を含む）
+_NOTE_ALIASES: dict[str, int] = {
+    "C": 0, "B#": 0,
+    "C#": 1, "D♭": 1,
+    "D": 2,
+    "D#": 3, "E♭": 3,
+    "E": 4, "F♭": 4,
+    "F": 5, "E#": 5,
+    "F#": 6, "G♭": 6,
+    "G": 7,
+    "G#": 8, "A♭": 8,
+    "A": 9,
+    "A#": 10, "B♭": 10,
+    "B": 11, "C♭": 11,
+}
+
+
+def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    """コサイン類似度を計算する（ゼロ除算安全）"""
+    denom = np.linalg.norm(a) * np.linalg.norm(b)
+    if denom < 1e-10:
+        return 0.0
+    return float(np.dot(a, b) / denom)
 
 
 class AudioProcessor:
@@ -18,6 +53,8 @@ class AudioProcessor:
         self.sr = 44100  # サンプリングレート
         self.y = None  # 音声データ
         self.sr_loaded = None
+        self.detected_bpm: int | None = None   # 検出BPM
+        self.detected_key: str | None = None   # 検出キー（例："A♭ メジャー"）
         
     def load_audio(self, file_path):
         """
@@ -166,3 +203,164 @@ class AudioProcessor:
         """音声データをクリア"""
         self.y = None
         self.sr_loaded = None
+        self.detected_bpm = None
+        self.detected_key = None
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # テンポ・キー自動検出
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def detect_tempo(self, y: np.ndarray, sr: int) -> int:
+        """
+        BPM を検出して int に丸めて返す。
+
+        Args:
+            y: モノラル 1D float32 配列
+            sr: サンプリングレート
+
+        Returns:
+            int: 検出 BPM
+        """
+        tempo = librosa.feature.rhythm.tempo(y=y.astype(np.float32), sr=sr)
+        # librosa >= 0.10 は numpy array を返す場合があるため flatten して取り出す
+        bpm = float(np.atleast_1d(tempo)[0])
+        return int(round(bpm))
+
+    def detect_key(self, y: np.ndarray, sr: int) -> str:
+        """
+        Krumhansl-Schmuckler アルゴリズムでキーを推定し文字列で返す。
+
+        Args:
+            y: モノラル 1D float32 配列
+            sr: サンプリングレート
+
+        Returns:
+            str: 例 "A♭ メジャー" / "E マイナー"
+        """
+        chroma = librosa.feature.chroma_cqt(y=y.astype(np.float32), sr=sr)
+        chroma_mean = chroma.mean(axis=1)  # shape (12,)
+
+        best_score = -np.inf
+        best_note = "C"
+        best_mode = "メジャー"
+
+        for shift in range(12):
+            major_profile = np.roll(_KS_MAJOR, shift)
+            minor_profile = np.roll(_KS_MINOR, shift)
+
+            score_major = _cosine_similarity(chroma_mean, major_profile)
+            score_minor = _cosine_similarity(chroma_mean, minor_profile)
+
+            if score_major > best_score:
+                best_score = score_major
+                best_note = _NOTE_NAMES[shift]
+                best_mode = "メジャー"
+
+            if score_minor > best_score:
+                best_score = score_minor
+                best_note = _NOTE_NAMES[shift]
+                best_mode = "マイナー"
+
+        return f"{best_note} {best_mode}"
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # ピッチ・テンポ変換
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def apply_pitch_shift(self, audio: np.ndarray, n_steps: int, sr: int) -> np.ndarray:
+        """
+        ピッチシフトを適用する。ステレオ入力にも対応。
+
+        Args:
+            audio: (samples, channels) 形式の ndarray
+            n_steps: 半音単位のシフト量（整数）
+            sr: サンプリングレート
+
+        Returns:
+            ndarray: (samples, channels) 形式のピッチシフト済み音声
+        """
+        audio = np.asarray(audio, dtype=np.float32)
+        n_channels = audio.shape[1] if audio.ndim == 2 else 1
+
+        if n_channels == 1:
+            shifted = librosa.effects.pitch_shift(
+                audio[:, 0] if audio.ndim == 2 else audio,
+                sr=sr,
+                n_steps=float(n_steps),
+            )
+            return shifted.reshape(-1, 1)
+
+        channels_out = []
+        for ch in range(n_channels):
+            shifted_ch = librosa.effects.pitch_shift(
+                audio[:, ch],
+                sr=sr,
+                n_steps=float(n_steps),
+            )
+            channels_out.append(shifted_ch)
+
+        return np.stack(channels_out, axis=1).astype(np.float32)
+
+    def apply_time_stretch(self, audio: np.ndarray, rate: float, sr: int) -> np.ndarray:
+        """
+        タイムストレッチを適用する。ステレオ入力にも対応。
+
+        Args:
+            audio: (samples, channels) 形式の ndarray
+            rate: 再生速度倍率（>1 で速く、<1 で遅くなる）
+            sr: サンプリングレート（現在は未使用だが将来の拡張用に保持）
+
+        Returns:
+            ndarray: (samples_out, channels) 形式のストレッチ済み音声
+        """
+        audio = np.asarray(audio, dtype=np.float32)
+        n_channels = audio.shape[1] if audio.ndim == 2 else 1
+
+        if n_channels == 1:
+            stretched = librosa.effects.time_stretch(
+                audio[:, 0] if audio.ndim == 2 else audio,
+                rate=float(rate),
+            )
+            return stretched.reshape(-1, 1)
+
+        channels_out = []
+        for ch in range(n_channels):
+            stretched_ch = librosa.effects.time_stretch(
+                audio[:, ch],
+                rate=float(rate),
+            )
+            channels_out.append(stretched_ch)
+
+        # チャンネルごとに長さが僅かにずれる場合があるため最小長に揃える
+        min_len = min(c.shape[0] for c in channels_out)
+        trimmed = [c[:min_len] for c in channels_out]
+        return np.stack(trimmed, axis=1).astype(np.float32)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # キー変換ユーティリティ
+    # ──────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def transpose_key(key_str: str, semitones: int) -> str:
+        """
+        キー文字列を指定した半音数だけ移調して返す。
+
+        Args:
+            key_str: 例 "A♭ メジャー"
+            semitones: 半音数（負も可）
+
+        Returns:
+            str: 移調後のキー文字列
+        """
+        parts = key_str.rsplit(" ", 1)
+        if len(parts) != 2:
+            return key_str
+        note_str, mode = parts
+        note_str = note_str.strip()
+        mode = mode.strip()
+
+        if note_str not in _NOTE_ALIASES:
+            return key_str
+
+        idx = (_NOTE_ALIASES[note_str] + semitones) % 12
+        return f"{_NOTE_NAMES[idx]} {mode}"
