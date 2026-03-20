@@ -559,6 +559,7 @@ class StemCraftApp(QMainWindow):
         self.is_vocal_removed = False
         self.stems = {}  # ステムをリセット
         self._original_stems = {}
+        self._converted_audio = None
         self.stems_widget.setVisible(False)
         
         if clear_status:
