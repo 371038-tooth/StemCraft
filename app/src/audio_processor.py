@@ -11,6 +11,12 @@ from pathlib import Path
 import tempfile
 from pydub import AudioSegment
 
+try:
+    import pedalboard as _pedalboard
+    _PEDALBOARD_AVAILABLE = True
+except ImportError:
+    _PEDALBOARD_AVAILABLE = False
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Krumhansl-Schmuckler 調性プロファイル（モジュール定数）
@@ -266,7 +272,49 @@ class AudioProcessor:
     # ──────────────────────────────────────────────────────────────────────────
     # ピッチ・テンポ変換
     # ──────────────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _to_ch_first(audio: np.ndarray) -> np.ndarray:
+        """内部ユーティリティ: (samples, channels) -> (channels, samples)"""
+        audio = np.asarray(audio, dtype=np.float32)
+        return audio.T if audio.ndim == 2 else audio[np.newaxis, :]
 
+    @staticmethod
+    def _from_ch_first(result: np.ndarray, original_ndim: int) -> np.ndarray:
+        """内部ユーティリティ: (channels, samples) -> (samples, channels)"""
+        return result.T if original_ndim == 2 else result[0].reshape(-1, 1)
+
+    def apply_pitch_and_tempo(self, audio: np.ndarray, n_steps: int, rate: float, sr: int) -> np.ndarray:
+        """ピッチとテンポを一括適用（pedalboard を優先使用）
+
+        Args:
+            audio: (samples, channels) 形式の ndarray
+            n_steps: 半音単位のピッチシフト量（0 で変換なし）
+            rate: タイムストレッチ倍率（1.0 で変換なし、>1 で高速）
+            sr: サンプリングレート
+
+        Returns:
+            ndarray: (samples_out, channels) 形式の変換済み音声
+        """
+        if n_steps == 0 and abs(rate - 1.0) <= 0.001:
+            return np.asarray(audio, dtype=np.float32)
+
+        if _PEDALBOARD_AVAILABLE:
+            ch_first = self._to_ch_first(audio)
+            result = _pedalboard.time_stretch(
+                ch_first,
+                float(sr),
+                stretch_factor=float(rate),
+                pitch_shift_in_semitones=float(n_steps),
+            )
+            return self._from_ch_first(result, audio.ndim)
+
+        # pedalboard なしのフォールバック: librosa で順次適用
+        result = np.asarray(audio, dtype=np.float32)
+        if n_steps != 0:
+            result = self.apply_pitch_shift(result, n_steps, sr)
+        if abs(rate - 1.0) > 0.001:
+            result = self.apply_time_stretch(result, rate, sr)
+        return result
     def apply_pitch_shift(self, audio: np.ndarray, n_steps: int, sr: int) -> np.ndarray:
         """
         ピッチシフトを適用する。ステレオ入力にも対応。

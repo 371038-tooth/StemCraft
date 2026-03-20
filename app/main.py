@@ -146,13 +146,10 @@ class PitchTempoWorker(QThread):
                 msg_parts.append(f"テンポ ×{self.rate:.3f}")
             self.progress.emit(f"🎵 変換中 ({', '.join(msg_parts) or '変更なし'})...")
 
+            n_steps, rate = self.n_steps, self.rate
+
             def transform(audio):
-                result = audio
-                if self.n_steps != 0:
-                    result = self.audio_processor.apply_pitch_shift(result, self.n_steps, sr)
-                if abs(self.rate - 1.0) > 0.001:
-                    result = self.audio_processor.apply_time_stretch(result, self.rate, sr)
-                return result
+                return self.audio_processor.apply_pitch_and_tempo(audio, n_steps, rate, sr)
 
             self.finished.emit(self._apply_to_all(transform))
         except Exception as e:
