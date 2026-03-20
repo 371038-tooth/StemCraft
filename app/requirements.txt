@@ -5,3 +5,4 @@ scipy>=1.5.0
 pydub>=0.25.0
 soundfile>=0.11.0
 sounddevice>=0.4.0
+pedalboard>=0.8.0

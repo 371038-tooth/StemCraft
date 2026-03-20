@@ -131,13 +131,14 @@ class AdvancedVocalRemover:
                 print(f"[Error] Demucs model initialization failed: {e}")
                 return False
     
-    def separate_audio(self, audio_path, output_dir=None):
+    def separate_audio(self, audio_path, output_dir=None, progress_callback=None):
         """
         AI解析で音源を分離（ボーカル、ドラム、ベース、その他）
         
         Args:
             audio_path: 入力音声ファイルパス
             output_dir: 出力ディレクトリ（オプション）
+            progress_callback: 進捗を返すコールバック関数 func(current, total)
         
         Returns:
             dict: { 'vocals': np.array, 'drums': np.array, 'bass': np.array, 'other': np.array }
@@ -182,9 +183,44 @@ class AdvancedVocalRemover:
                 
                 print(f"[Separation] Source separation in progress... Input shape: {wav.shape}")
                 
+                # tqdmのモンキーパッチを用いて進捗を取得する
+                original_tqdm = None
+                if progress_callback:
+                    import demucs.apply
+                    original_tqdm = getattr(demucs.apply.tqdm, 'tqdm', None)
+                    
+                    class PatchedTqdm:
+                        def __init__(self_tqdm, iterable, **kwargs):
+                            try:
+                                self_tqdm.iterable = list(iterable)
+                                self_tqdm.total = len(self_tqdm.iterable)
+                            except TypeError:
+                                self_tqdm.iterable = iterable
+                                self_tqdm.total = getattr(iterable, '__len__', lambda: 0)()
+                            self_tqdm.current = 0
+                            
+                            # 初期状態を送信
+                            if self_tqdm.total > 0:
+                                progress_callback(0, self_tqdm.total)
+                                
+                        def __iter__(self_tqdm):
+                            for item in self_tqdm.iterable:
+                                yield item
+                                self_tqdm.current += 1
+                                if self_tqdm.total > 0:
+                                    progress_callback(self_tqdm.current, self_tqdm.total)
+                                    
+                    demucs.apply.tqdm.tqdm = PatchedTqdm
+
                 # Demucsで分離
-                with torch.no_grad():
-                    sources = apply_model(self.model, wav, shifts=1, split=True, overlap=0.25)
+                try:
+                    with torch.no_grad():
+                        sources = apply_model(self.model, wav, shifts=1, split=True, overlap=0.25, progress=bool(progress_callback))
+                finally:
+                    # パッチを戻す
+                    if progress_callback and original_tqdm is not None:
+                        import demucs.apply
+                        demucs.apply.tqdm.tqdm = original_tqdm
                 
                 # sources: (batch, sources_count, channels, time)
                 # model.sources: ['drums', 'bass', 'other', 'vocals'] (example)
