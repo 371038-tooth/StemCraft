@@ -111,34 +111,43 @@ echo.
 
 REM FFmpeg チェック・セットアップ
 echo FFmpeg をチェック中...
+set "FFMPEG_STATUS=none"
 if exist "%ROOT%ffmpeg\bin\ffmpeg.exe" (
-    echo FFmpeg detected (local)
-    echo.
+    set "FFMPEG_STATUS=local"
 ) else (
     ffmpeg -version >nul 2>&1
     if not errorlevel 1 (
-        echo FFmpeg detected (system)
-        echo.
-        goto RUN_APP
+        set "FFMPEG_STATUS=system"
     )
+)
 
+if "%FFMPEG_STATUS%"=="local" (
+    echo FFmpeg チェック完了 [ローカル]
     echo.
-    echo FFmpeg がインストールされていません
-    echo FFmpeg を自動ダウンロード・セットアップしています...
+    goto RUN_APP
+)
+if "%FFMPEG_STATUS%"=="system" (
+    echo FFmpeg チェック完了 [システム PATH]
     echo.
-    
-    REM PowerShell でセットアップスクリプトを実行
-    powershell -NoProfile -ExecutionPolicy Bypass -File "setup_ffmpeg_new.ps1"
-    
-    if errorlevel 1 (
-        echo.
-        echo WARNING FFmpeg setup failed
-        echo Please manually download from: https://ffmpeg.org/download.html
-        echo.
-    ) else (
-        echo FFmpeg setup completed
-        echo.
-    )
+    goto RUN_APP
+)
+
+echo.
+echo FFmpeg がインストールされていません
+echo FFmpeg を自動ダウンロード・セットアップしています...
+echo.
+
+REM PowerShell でセットアップスクリプトを実行
+powershell -NoProfile -ExecutionPolicy Bypass -File "setup_ffmpeg_new.ps1"
+
+if errorlevel 1 (
+    echo.
+    echo WARNING: FFmpeg のセットアップに失敗しました
+    echo 手動でダウンロードしてください: https://ffmpeg.org/download.html
+    echo.
+) else (
+    echo FFmpeg チェック完了 [セットアップ完了]
+    echo.
 )
 
 :RUN_APP

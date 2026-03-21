@@ -26,3 +26,6 @@ ffmpeg/
 
 # Models (downloaded at runtime)
 models/*.th
+
+# Tests
+app/tests/
