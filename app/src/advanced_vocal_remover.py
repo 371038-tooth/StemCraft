@@ -25,6 +25,7 @@ import numpy as np
 import soundfile as sf
 import tempfile
 from pydub import AudioSegment
+from .audio_processor import AudioProcessor
 
 # Demucsのインポート（Torch利用可時のみ）
 if TORCH_AVAILABLE:
@@ -52,18 +53,6 @@ class AdvancedVocalRemover:
         self.initialized = False
         self.initialization_error = None
         self._lock = threading.Lock()
-
-    @staticmethod
-    def _get_ffmpeg_path():
-        """ffmpeg 実行ファイルのパスを返す（未検出時は None）"""
-        import shutil
-        path = shutil.which('ffmpeg')
-        if path:
-            return path
-        local = Path(__file__).parent.parent / 'ffmpeg' / 'bin' / 'ffmpeg.exe'
-        if local.exists():
-            return str(local)
-        return None
 
     def _select_device(self):
         """利用可能なデバイスを選択（CUDAが使えない場合はCPUへフォールバック）"""
@@ -175,16 +164,16 @@ class AdvancedVocalRemover:
                 # librosaなどで読み込むと (channels, samples) だったりするが、sf.readは (samples, channels)
                 suffix = Path(audio_path).suffix.lower()
                 if suffix in _SOUNDFILE_UNSUPPORTED:
-                    ffmpeg_path = self._get_ffmpeg_path()
+                    ffmpeg_path = AudioProcessor._find_ffmpeg()
                     if ffmpeg_path is None:
                         raise RuntimeError(
-                            f"{suffix} ファイルの変換に ffmpeg が必要ですが、見つかりませんでした。\n"
-                            "run.bat を再実行するか、ffmpeg を PATH に追加してください。"
+                            f"{suffix} ファイルの変換に ffmpeg が必要です。\n\n"
+                            "以下のいずれかを実行してください：\n"
+                            "  1. run.bat を再実行して ffmpeg を自動セットアップする\n"
+                            "  2. https://ffmpeg.org からダウンロードし PATH に追加する\n"
+                            "  3. 設定画面で ffmpeg の実行ファイルのパスを指定する"
                         )
-                    ffprobe = Path(ffmpeg_path).with_name('ffprobe.exe')
-                    AudioSegment.converter = ffmpeg_path
-                    if ffprobe.exists():
-                        AudioSegment.ffprobe = str(ffprobe)
+                    AudioProcessor._configure_pydub_ffmpeg(ffmpeg_path)
                     seg = AudioSegment.from_file(audio_path)
                     tmp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
                     tmp_path = tmp.name
