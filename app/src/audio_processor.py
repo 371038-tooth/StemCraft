@@ -1,4 +1,4 @@
-"""
+﻿"""
 オーディオ処理モジュール
 ボーカル除去と音声ファイル処理を担当
 """
@@ -58,13 +58,34 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 class AudioProcessor:
     """オーディオ処理クラス"""
-    
-    def __init__(self):
+
+    @staticmethod
+    def _find_ffmpeg():
+        import shutil
+        # 1. PATH から検索
+        path = shutil.which('ffmpeg')
+        if path:
+            return path
+        # 2. プロジェクト内 app/ffmpeg/bin/ を検索
+        local = Path(__file__).parent.parent / 'ffmpeg' / 'bin' / 'ffmpeg.exe'
+        if local.exists():
+            return str(local)
+        return None
+
+    @staticmethod
+    def _configure_pydub_ffmpeg(ffmpeg_path):
+        ffprobe = Path(ffmpeg_path).with_name('ffprobe.exe')
+        AudioSegment.converter = ffmpeg_path
+        if ffprobe.exists():
+            AudioSegment.ffprobe = str(ffprobe)
+
+    def __init__(self, ffmpeg_path=None):
         self.sr = 44100  # サンプリングレート
         self.y = None  # 音声データ
         self.sr_loaded = None
         self.detected_bpm: int | None = None   # 検出BPM
         self.detected_key: str | None = None   # 検出キー（例："A♭ メジャー"）
+        self._ffmpeg_path = ffmpeg_path
         
     def load_audio(self, file_path):
         """
@@ -74,7 +95,7 @@ class AudioProcessor:
             file_path: 音声ファイルのパス
             
         Returns:
-            bool: 成功した場合True
+            tuple[bool, str]: 成功フラグとエラーメッセージ。成功時は (True, "")、失敗時は (False, エラー内容)
         """
         try:
             file_path = Path(file_path)
@@ -98,11 +119,11 @@ class AudioProcessor:
             # モノラル(1D)の場合は (samples, 1) に整形して後続処理と統一
             if isinstance(self.y, np.ndarray) and self.y.ndim == 1:
                 self.y = self.y.reshape(-1, 1)
-            
-            return True
+
+            return True, ""
         except Exception as e:
             print(f"エラー: {e}")
-            return False
+            return False, str(e)
     
     def _load_with_pydub(self, file_path):
         """
@@ -115,6 +136,17 @@ class AudioProcessor:
             tuple: (y, sr) 音声データとサンプリングレート
         """
         tmp_path = None
+        # ffmpeg を優先順で解決
+        ffmpeg = self._ffmpeg_path or AudioProcessor._find_ffmpeg()
+        if ffmpeg is None:
+            raise RuntimeError(
+                "M4A / AAC ファイルの読み込みには ffmpeg が必要です。\n\n"
+                "以下のいずれかを実行してください：\n"
+                "  1. run.bat を再実行して ffmpeg を自動セットアップする\n"
+                "  2. https://ffmpeg.org からダウンロードし PATH に追加する\n"
+                "  3. 設定画面で ffmpeg の実行ファイルのパスを指定する"
+            )
+        AudioProcessor._configure_pydub_ffmpeg(ffmpeg)
         try:
             # pydub で音声ファイルを読み込む
             audio = AudioSegment.from_file(file_path)
@@ -135,6 +167,14 @@ class AudioProcessor:
                 y = y.reshape(-1, 1)
             
             return y, sr
+        except FileNotFoundError as e:
+            raise RuntimeError(
+                "M4A / AAC ファイルの読み込みには ffmpeg が必要です。\n\n"
+                "以下のいずれかを実行してください：\n"
+                "  1. run.bat を再実行して ffmpeg を自動セットアップする\n"
+                "  2. https://ffmpeg.org からダウンロードし PATH に追加する\n"
+                "  3. 設定画面で ffmpeg の実行ファイルのパスを指定する"
+            ) from e
         except Exception as e:
             print(f"pydub を使用した読み込みエラー: {e}")
             raise
@@ -151,7 +191,7 @@ class AudioProcessor:
             output_path: 出力ファイルのパス
             
         Returns:
-            bool: 成功した場合True
+            tuple[bool, str]: 成功フラグとエラーメッセージ。成功時は (True, "")、失敗時は (False, エラー内容)
         """
         try:
             if self.sr_loaded is None:

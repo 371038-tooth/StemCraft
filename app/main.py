@@ -4,6 +4,7 @@
 """
 
 import sys
+import json
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
@@ -14,13 +15,31 @@ from src.advanced_vocal_remover import get_advanced_remover
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QSlider, QLabel, QCheckBox, QFileDialog, QProgressBar,
-    QGroupBox, QSpinBox,
+    QGroupBox, QSpinBox, QDialog, QLineEdit, QMessageBox,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize
 from PyQt5.QtGui import QFont, QIcon, QPixmap, QPainter, QColor
 
 from src.audio_processor import AudioProcessor
 from src.audio_player import AudioPlayer
+
+_CONFIG_PATH = Path(__file__).parent / 'app_config.json'
+
+
+def _load_config():
+    if _CONFIG_PATH.exists():
+        try:
+            return json.loads(_CONFIG_PATH.read_text(encoding='utf-8'))
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_config(config):
+    _CONFIG_PATH.write_text(
+        json.dumps(config, ensure_ascii=False, indent=2),
+        encoding='utf-8'
+    )
 
 
 class ModelInitializationWorker(QThread):
@@ -204,12 +223,57 @@ class PitchTempoWorker(QThread):
             return func(self.audio_processor.get_audio_data(), progress_callback=cb)
 
 
+class FfmpegSettingsDialog(QDialog):
+    def __init__(self, current_path, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("設定 — ffmpeg パス")
+        self.setMinimumWidth(480)
+
+        layout = QVBoxLayout(self)
+
+        layout.addWidget(QLabel(
+            "M4A / AAC ファイルの読み込みに使用する ffmpeg.exe のパスを指定してください。\n"
+            "空白のままにすると PATH から自動検索します。"
+        ))
+
+        path_row = QHBoxLayout()
+        self.path_edit = QLineEdit(current_path or "")
+        self.path_edit.setPlaceholderText("例: C:/tools/ffmpeg/bin/ffmpeg.exe")
+        path_row.addWidget(self.path_edit)
+        browse_btn = QPushButton("参照...")
+        browse_btn.clicked.connect(self._browse)
+        path_row.addWidget(browse_btn)
+        layout.addLayout(path_row)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("キャンセル")
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(ok_btn)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+    def _browse(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "ffmpeg.exe を選択", "", "実行ファイル (*.exe);;全てのファイル (*.*)"
+        )
+        if path:
+            self.path_edit.setText(path)
+
+    def get_path(self):
+        return self.path_edit.text().strip()
+
+
 class StemCraftApp(QMainWindow):
     """メインアプリケーションウィンドウ"""
-    
+
     def __init__(self):
         super().__init__()
-        self.audio_processor = AudioProcessor()
+        self._config = _load_config()
+        ffmpeg_path = self._config.get('ffmpeg_path') or None
+        self.audio_processor = AudioProcessor(ffmpeg_path=ffmpeg_path)
         self.audio_player = AudioPlayer()
         self.current_file = None
         self.is_vocal_removed = False
@@ -679,7 +743,7 @@ class StemCraftApp(QMainWindow):
         main_layout.addWidget(self.pt_conversion_progress)
         # ─────────────────────────────────────────────────────────────────────
 
-        # 保存ボタン
+        # 保存ボタン / 設定ボタン
         save_layout = QHBoxLayout()
         self.save_btn = QPushButton("音声保存")
         self.save_btn.setObjectName("primaryButton")
@@ -687,6 +751,10 @@ class StemCraftApp(QMainWindow):
         self.save_btn.clicked.connect(self.save_audio)
         self.save_btn.setEnabled(False)
         save_layout.addWidget(self.save_btn)
+        self.settings_btn = QPushButton("⚙ 設定")
+        self.settings_btn.setFont(QFont("Arial", 10))
+        self.settings_btn.clicked.connect(self.open_settings)
+        save_layout.addWidget(self.settings_btn)
         main_layout.addLayout(save_layout)
         
         central_widget.setLayout(main_layout)
@@ -701,7 +769,8 @@ class StemCraftApp(QMainWindow):
         )
         
         if file_path:
-            if self.audio_processor.load_audio(file_path):
+            success, err_msg = self.audio_processor.load_audio(file_path)
+            if success:
                 self.current_file = file_path
                 self.file_label.setText(f"ファイル: {Path(file_path).name}")
                 
@@ -738,6 +807,11 @@ class StemCraftApp(QMainWindow):
                 self.start_auto_detect()
             else:
                 self.file_label.setText("ファイル: 読込失敗")
+                QMessageBox.critical(
+                    self,
+                    "読み込みエラー",
+                    err_msg or "ファイルの読み込みに失敗しました。"
+                )
     
     def play_audio(self):
         """音声を再生"""
@@ -1100,6 +1174,16 @@ class StemCraftApp(QMainWindow):
         secs = int(seconds) % 60
         return f"{minutes}:{secs:02d}"
     
+    def open_settings(self):
+        """ffmpeg 設定ダイアログを開く"""
+        current = self._config.get('ffmpeg_path', '')
+        dlg = FfmpegSettingsDialog(current, parent=self)
+        if dlg.exec_() == QDialog.Accepted:
+            new_path = dlg.get_path()
+            self._config['ffmpeg_path'] = new_path
+            _save_config(self._config)
+            self.audio_processor._ffmpeg_path = new_path or None
+
     def save_audio(self):
         """現在のミックス設定で音声を保存"""
         has_stems = bool(self.stems)
