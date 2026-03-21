@@ -1,4 +1,4 @@
-"""
+﻿"""
 オーディオ処理モジュール
 ボーカル除去と音声ファイル処理を担当
 """
@@ -95,7 +95,7 @@ class AudioProcessor:
             file_path: 音声ファイルのパス
             
         Returns:
-            bool: 成功した場合True
+            tuple[bool, str]: 成功フラグとエラーメッセージ。成功時は (True, "")、失敗時は (False, エラー内容)
         """
         try:
             file_path = Path(file_path)
@@ -191,7 +191,7 @@ class AudioProcessor:
             output_path: 出力ファイルのパス
             
         Returns:
-            bool: 成功した場合True
+            tuple[bool, str]: 成功フラグとエラーメッセージ。成功時は (True, "")、失敗時は (False, エラー内容)
         """
         try:
             if self.sr_loaded is None:

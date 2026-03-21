@@ -1,4 +1,4 @@
-"""
+﻿"""
 AudioProcessor の ffmpeg 検出・設定メソッドおよび load_audio 戻り値のテスト
 """
 
@@ -54,6 +54,20 @@ class TestFindFfmpeg:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class TestConfigurePydubFfmpeg:
+    @pytest.fixture(autouse=True)
+    def restore_pydub_state(self):
+        """AudioSegment のクラス変数をテスト後に元に戻す"""
+        from pydub import AudioSegment
+        original_converter = AudioSegment.converter
+        ffprobe_existed = hasattr(AudioSegment, "ffprobe")
+        original_ffprobe = getattr(AudioSegment, "ffprobe", None)
+        yield
+        AudioSegment.converter = original_converter
+        if ffprobe_existed:
+            AudioSegment.ffprobe = original_ffprobe
+        elif hasattr(AudioSegment, "ffprobe"):
+            del AudioSegment.ffprobe
+
     def test_sets_converter(self, tmp_path):
         """converter が指定したパスに設定される"""
         from pydub import AudioSegment
