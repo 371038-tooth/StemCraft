@@ -23,6 +23,9 @@ except OSError as e:
 from pathlib import Path
 import numpy as np
 import soundfile as sf
+import tempfile
+from pydub import AudioSegment
+from .audio_processor import AudioProcessor
 
 # Demucsのインポート（Torch利用可時のみ）
 if TORCH_AVAILABLE:
@@ -33,6 +36,10 @@ if TORCH_AVAILABLE:
     except ImportError as e:
         print(f"Warning: Failed to import Demucs: {e}")
         AI_REMOVAL_AVAILABLE = False
+
+
+# soundfile が対応しないフォーマット（pydub 経由で変換が必要）
+_SOUNDFILE_UNSUPPORTED = {'.m4a', '.mp4', '.aac', '.alac'}
 
 
 class AdvancedVocalRemover:
@@ -155,7 +162,29 @@ class AdvancedVocalRemover:
                 # 音声ファイルを読み込み
                 print(f"[Audio] Loading audio file: {Path(audio_path).name}")
                 # librosaなどで読み込むと (channels, samples) だったりするが、sf.readは (samples, channels)
-                audio, sr = sf.read(audio_path)
+                suffix = Path(audio_path).suffix.lower()
+                if suffix in _SOUNDFILE_UNSUPPORTED:
+                    ffmpeg_path = AudioProcessor._find_ffmpeg()
+                    if ffmpeg_path is None:
+                        raise RuntimeError(
+                            f"{suffix} ファイルの変換に ffmpeg が必要です。\n\n"
+                            "以下のいずれかを実行してください：\n"
+                            "  1. run.bat を再実行して ffmpeg を自動セットアップする\n"
+                            "  2. https://ffmpeg.org からダウンロードし PATH に追加する\n"
+                            "  3. 設定画面で ffmpeg の実行ファイルのパスを指定する"
+                        )
+                    AudioProcessor._configure_pydub_ffmpeg(ffmpeg_path)
+                    seg = AudioSegment.from_file(audio_path)
+                    tmp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+                    tmp_path = tmp.name
+                    tmp.close()
+                    try:
+                        seg.export(tmp_path, format='wav')
+                        audio, sr = sf.read(tmp_path)
+                    finally:
+                        Path(tmp_path).unlink(missing_ok=True)
+                else:
+                    audio, sr = sf.read(audio_path)
                 
                 # Demucs向けにステレオ化し、(channels, samples) へ変換
                 if len(audio.shape) == 1:
