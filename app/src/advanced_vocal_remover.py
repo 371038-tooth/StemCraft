@@ -23,6 +23,8 @@ except OSError as e:
 from pathlib import Path
 import numpy as np
 import soundfile as sf
+import tempfile
+from pydub import AudioSegment
 
 # Demucsのインポート（Torch利用可時のみ）
 if TORCH_AVAILABLE:
@@ -33,6 +35,10 @@ if TORCH_AVAILABLE:
     except ImportError as e:
         print(f"Warning: Failed to import Demucs: {e}")
         AI_REMOVAL_AVAILABLE = False
+
+
+# soundfile が対応しないフォーマット（pydub 経由で変換が必要）
+_SOUNDFILE_UNSUPPORTED = {'.m4a', '.mp4', '.aac', '.alac'}
 
 
 class AdvancedVocalRemover:
@@ -46,6 +52,18 @@ class AdvancedVocalRemover:
         self.initialized = False
         self.initialization_error = None
         self._lock = threading.Lock()
+
+    @staticmethod
+    def _get_ffmpeg_path():
+        """ffmpeg 実行ファイルのパスを返す（未検出時は None）"""
+        import shutil
+        path = shutil.which('ffmpeg')
+        if path:
+            return path
+        local = Path(__file__).parent.parent / 'ffmpeg' / 'bin' / 'ffmpeg.exe'
+        if local.exists():
+            return str(local)
+        return None
 
     def _select_device(self):
         """利用可能なデバイスを選択（CUDAが使えない場合はCPUへフォールバック）"""
@@ -155,7 +173,29 @@ class AdvancedVocalRemover:
                 # 音声ファイルを読み込み
                 print(f"[Audio] Loading audio file: {Path(audio_path).name}")
                 # librosaなどで読み込むと (channels, samples) だったりするが、sf.readは (samples, channels)
-                audio, sr = sf.read(audio_path)
+                suffix = Path(audio_path).suffix.lower()
+                if suffix in _SOUNDFILE_UNSUPPORTED:
+                    ffmpeg_path = self._get_ffmpeg_path()
+                    if ffmpeg_path is None:
+                        raise RuntimeError(
+                            f"{suffix} ファイルの変換に ffmpeg が必要ですが、見つかりませんでした。\n"
+                            "run.bat を再実行するか、ffmpeg を PATH に追加してください。"
+                        )
+                    ffprobe = Path(ffmpeg_path).with_name('ffprobe.exe')
+                    AudioSegment.converter = ffmpeg_path
+                    if ffprobe.exists():
+                        AudioSegment.ffprobe = str(ffprobe)
+                    seg = AudioSegment.from_file(audio_path)
+                    tmp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+                    tmp_path = tmp.name
+                    tmp.close()
+                    try:
+                        seg.export(tmp_path, format='wav')
+                        audio, sr = sf.read(tmp_path)
+                    finally:
+                        Path(tmp_path).unlink(missing_ok=True)
+                else:
+                    audio, sr = sf.read(audio_path)
                 
                 # Demucs向けにステレオ化し、(channels, samples) へ変換
                 if len(audio.shape) == 1:
